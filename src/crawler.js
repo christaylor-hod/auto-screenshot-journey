@@ -27,6 +27,10 @@ export class FormCrawler {
     this.delay = options.delay || 500;
     this.stayOnDomain = options.stayOnDomain !== false;
     this.excludeFields = options.excludeFields || new Set();
+    this.logger = options.logger || null;
+    this.verbose = options.verbose || false;
+    this.password = options.password || null;
+    this.httpAuth = options.httpAuth || null; // { username, password }
 
     // Collected data
     this.pages = new Map();        // pageKey -> page data
@@ -36,6 +40,7 @@ export class FormCrawler {
 
     this.pathCount = 0;
     this.browser = null;
+    this.authCookies = [];          // Cookies from initial authentication
   }
 
   shortPageId(url) {
@@ -49,6 +54,150 @@ export class FormCrawler {
 
   pageKey(url) {
     return url.split('?')[0].split('#')[0];
+  }
+
+  /**
+   * Create a new browser context with auth cookies and HTTP credentials applied
+   */
+  async createContext() {
+    const contextOptions = {
+      viewport: { width: 1280, height: 900 }
+    };
+
+    // Apply HTTP Basic Auth if configured
+    if (this.httpAuth) {
+      contextOptions.httpCredentials = this.httpAuth;
+    }
+
+    const context = await this.browser.newContext(contextOptions);
+
+    // Inject auth cookies from initial authentication
+    if (this.authCookies.length > 0) {
+      await context.addCookies(this.authCookies);
+    }
+
+    return context;
+  }
+
+  /**
+   * Authenticate with the target site before crawling.
+   * Handles GOV.UK Prototype Kit password pages and HTTP Basic Auth.
+   */
+  async authenticate() {
+    if (!this.password && !this.httpAuth) return;
+
+    if (this.httpAuth) {
+      console.log(`  🔑 HTTP Basic Auth configured for user "${this.httpAuth.username}"`);
+      // HTTP credentials are applied per-context in createContext(), no upfront step needed.
+      // But let's verify the credentials work:
+      const context = await this.createContext();
+      const page = await context.newPage();
+      try {
+        await page.goto(this.startUrl, { waitUntil: 'networkidle', timeout: this.timeout });
+        console.log(`  ✅ HTTP Auth successful`);
+        // Capture any cookies set after auth
+        this.authCookies = await context.cookies();
+      } catch (err) {
+        console.error(`  ❌ HTTP Auth failed: ${err.message}`);
+        throw new Error(`Authentication failed: ${err.message}`);
+      } finally {
+        await context.close();
+      }
+      return;
+    }
+
+    if (this.password) {
+      console.log(`  🔑 Authenticating with password...`);
+      const context = await this.browser.newContext({
+        viewport: { width: 1280, height: 900 }
+      });
+      const page = await context.newPage();
+
+      try {
+        await page.goto(this.startUrl, { waitUntil: 'networkidle', timeout: this.timeout });
+        await page.waitForTimeout(this.delay);
+
+        // Try to find and submit password on the GOV.UK Prototype Kit password page
+        // The kit uses a simple form with a single password input
+        const passwordSubmitted = await page.evaluate((pwd) => {
+          // GOV.UK Prototype Kit password page patterns
+          const passwordInputSelectors = [
+            'input[type="password"]',
+            'input[name="password"]',
+            '#password'
+          ];
+
+          for (const sel of passwordInputSelectors) {
+            const input = document.querySelector(sel);
+            if (input) {
+              // Found a password field — fill it via native input setter
+              const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+                window.HTMLInputElement.prototype, 'value'
+              ).set;
+              nativeInputValueSetter.call(input, pwd);
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+              return true;
+            }
+          }
+          return false;
+        }, this.password);
+
+        if (passwordSubmitted) {
+          // Use Playwright to fill (more reliable for form state) then submit
+          const pwdInput = page.locator('input[type="password"], input[name="password"], #password').first();
+          await pwdInput.fill(this.password, { timeout: 3000 });
+
+          // Click the submit button
+          const submitBtn = page.locator('button[type="submit"], input[type="submit"], button:has-text("Continue"), button:has-text("Enter"), button:has-text("Sign in")').first();
+          if (await submitBtn.count() > 0) {
+            await Promise.all([
+              page.waitForLoadState('networkidle', { timeout: this.timeout }).catch(() => {}),
+              submitBtn.click()
+            ]);
+          } else {
+            // Fallback: submit the form directly
+            await page.locator('form').first().evaluate(form => form.submit());
+            await page.waitForLoadState('networkidle', { timeout: this.timeout }).catch(() => {});
+          }
+
+          await page.waitForTimeout(this.delay);
+
+          // Check if we got past the password page
+          const stillOnPasswordPage = await page.locator('input[type="password"], input[name="password"]').count() > 0;
+
+          if (stillOnPasswordPage) {
+            console.error(`  ❌ Password rejected — still on password page`);
+            throw new Error('Password authentication failed: password was rejected');
+          }
+
+          console.log(`  ✅ Password accepted — authenticated at ${page.url()}`);
+
+          // Capture cookies for reuse in all subsequent contexts
+          this.authCookies = await context.cookies();
+
+          if (this.logger) {
+            this.logger.event('authentication', {
+              method: 'password',
+              success: true,
+              cookieCount: this.authCookies.length,
+              landingUrl: page.url()
+            });
+          }
+        } else {
+          console.log(`  ⚠ No password field found on start page — proceeding without auth`);
+          if (this.logger) {
+            this.logger.event('authentication', {
+              method: 'password',
+              success: false,
+              reason: 'no_password_field'
+            });
+          }
+        }
+      } finally {
+        await context.close();
+      }
+    }
   }
 
   /**
@@ -70,6 +219,8 @@ export class FormCrawler {
     });
 
     try {
+      // Authenticate if password or HTTP credentials configured
+      await this.authenticate();
       // Start exploring with no prior steps (empty replay history)
       await this.explorePath([], 0);
 
@@ -100,9 +251,7 @@ export class FormCrawler {
    * Returns { context, page, currentUrl } or null if replay fails.
    */
   async replayPath(steps) {
-    const context = await this.browser.newContext({
-      viewport: { width: 1280, height: 900 }
-    });
+    const context = await this.createContext();
     const page = await context.newPage();
 
     try {
@@ -110,9 +259,20 @@ export class FormCrawler {
       await page.goto(this.startUrl, { waitUntil: 'networkidle', timeout: this.timeout });
       await page.waitForTimeout(this.delay);
 
+      if (this.verbose) {
+        console.log(`     ↻ Replaying ${steps.length} step(s) from start...`);
+      }
+
       // Replay each step
       for (let i = 0; i < steps.length; i++) {
         const step = steps[i];
+
+        if (this.verbose) {
+          const choiceStr = Object.keys(step.choices || {}).length > 0
+            ? ` [${Object.values(step.choices).join(', ')}]`
+            : '';
+          console.log(`       ↻ Step ${i + 1}/${steps.length}: ${step.pageName || page.url()}${choiceStr}`);
+        }
 
         // Dismiss cookie banners
         await this.dismissCookieBanner(page);
@@ -122,7 +282,20 @@ export class FormCrawler {
         const fields = this.filterFields(rawFields);
 
         // Fill form with the recorded choices for this step
-        await fillFormFields(page, fields, step.choices || {});
+        const filledFields = await fillFormFields(page, fields, step.choices || {});
+
+        if (this.logger && this.verbose) {
+          this.logger.event('replay_fill', {
+            step: i + 1,
+            fieldsAttempted: fields.length,
+            fieldsFilled: filledFields.length,
+            fills: filledFields.map(f => ({
+              label: f.label || f.name || f.id,
+              type: f.type,
+              value: f.filledValue
+            }))
+          });
+        }
         await page.waitForTimeout(300);
 
         // Click continue
@@ -164,9 +337,7 @@ export class FormCrawler {
     let session;
     if (replaySteps.length === 0) {
       // First page - just navigate to start
-      const context = await this.browser.newContext({
-        viewport: { width: 1280, height: 900 }
-      });
+      const context = await this.createContext();
       const page = await context.newPage();
       await page.goto(this.startUrl, { waitUntil: 'networkidle', timeout: this.timeout });
       await page.waitForTimeout(this.delay);
@@ -204,6 +375,26 @@ export class FormCrawler {
       console.log(`  📄 [depth ${depth}] ${metadata.pageName || currentUrl}`);
       console.log(`     Fields: ${fields.length}, Choice points: ${choicePoints.length}`);
 
+      // Log structured event
+      if (this.logger) {
+        this.logger.event('page_visit', {
+          depth,
+          url: currentUrl,
+          pageName: metadata.pageName,
+          h1: metadata.h1,
+          fieldCount: fields.length,
+          choicePointCount: choicePoints.length,
+          fields: fields.map(f => ({
+            type: f.type, name: f.name, id: f.id,
+            label: (f.label || '').substring(0, 80),
+            required: f.required,
+            optionCount: f.options?.length || 0,
+            isChoicePoint: f.isChoicePoint || false
+          })),
+          buttons: metadata.buttons.map(b => b.text)
+        });
+      }
+
       // Take screenshot
       if (!this.screenshots.has(pk)) {
         const screenshotPath = path.join(this.outputDir, 'screenshots', `${pid}.png`);
@@ -239,6 +430,10 @@ export class FormCrawler {
         console.log(`     🏁 End page (no form or continue button)`);
         this.pages.get(pk).isEndPage = true;
 
+        if (this.logger) {
+          this.logger.event('end_page', { depth, url: currentUrl, pageName: metadata.pageName });
+        }
+
         this.paths.push({
           id: `path_${++this.pathCount}`,
           steps: this.buildPathSteps(replaySteps, currentUrl, metadata.pageName, {})
@@ -251,12 +446,33 @@ export class FormCrawler {
         const combinations = generateChoiceCombinations(choicePoints);
         console.log(`     🔀 ${combinations.length} choice combination(s) to explore`);
 
+        if (this.logger) {
+          this.logger.event('branch_point', {
+            depth, url: currentUrl, pageName: metadata.pageName,
+            choicePoints: choicePoints.map(cp => ({
+              name: cp.name,
+              options: cp.options.map(o => o.text || o.value)
+            })),
+            combinationCount: combinations.length
+          });
+        }
+
         for (let i = 0; i < combinations.length; i++) {
           if (this.pathCount >= this.maxPaths) break;
 
           const choices = combinations[i];
-          const choiceLabel = Object.entries(choices).map(([k, v]) => `${k}=${v}`).join(', ');
-          console.log(`\n  🔀 Exploring combination ${i + 1}/${combinations.length}: ${choiceLabel || 'default'}`);
+          const choiceLabel = Object.values(choices).join(', ');
+          const choiceLabelFull = Object.entries(choices).map(([k, v]) => `${k}=${v}`).join(', ');
+          console.log(`\n  🔀 Exploring combination ${i + 1}/${combinations.length}: ${choiceLabelFull || 'default'}`);
+
+          if (this.logger) {
+            this.logger.event('explore_combination', {
+              depth, url: currentUrl,
+              combinationIndex: i + 1,
+              totalCombinations: combinations.length,
+              choices
+            });
+          }
 
           // For the FIRST combination, reuse the current session to save time.
           // For subsequent combinations, we need a fresh session and full replay.
@@ -271,6 +487,9 @@ export class FormCrawler {
             const freshSession = await this.replayPath(replaySteps);
             if (!freshSession) {
               console.warn(`     ⚠ Could not replay to branch point for combination ${i + 1}`);
+              if (this.logger) {
+                this.logger.event('replay_failed', { depth, url: currentUrl, combinationIndex: i + 1 });
+              }
               continue;
             }
             branchPage = freshSession.page;
@@ -286,8 +505,30 @@ export class FormCrawler {
             const branchFields = this.filterFields(branchRawFields);
 
             // Fill the form with this combination
-            await fillFormFields(branchPage, branchFields, choices);
+            const filledFields = await fillFormFields(branchPage, branchFields, choices);
             await branchPage.waitForTimeout(300);
+
+            if (this.logger) {
+              this.logger.event('form_fill', {
+                depth,
+                url: currentUrl,
+                pageName: metadata.pageName,
+                combination: i + 1,
+                fieldsAttempted: branchFields.length,
+                fieldsFilled: filledFields.length,
+                fills: filledFields.map(f => ({
+                  label: f.label || f.name || f.id,
+                  type: f.type,
+                  value: f.filledValue
+                }))
+              });
+            }
+
+            if (this.verbose && filledFields.length > 0) {
+              for (const f of filledFields) {
+                console.log(`       ✏️  [${f.type}] ${f.label || f.name || f.id} → "${f.filledValue}"`);
+              }
+            }
 
             // Click continue
             const nextUrl = await this.clickContinue(branchPage);
@@ -300,6 +541,15 @@ export class FormCrawler {
                 label: choiceLabel || 'continue',
                 pathId: `path_${this.pathCount + 1}`
               });
+
+              if (this.logger) {
+                this.logger.event('navigation', {
+                  depth,
+                  from: currentUrl,
+                  to: nextUrl,
+                  trigger: choiceLabel || 'continue'
+                });
+              }
 
               // Build new replay steps: all previous steps + this choice
               const newReplaySteps = [...replaySteps, { choices, url: currentUrl, pageName: metadata.pageName }];
@@ -317,6 +567,16 @@ export class FormCrawler {
               const errorScreenshot = path.join(this.outputDir, 'screenshots', `${pid}_error_${i}.png`);
               await branchPage.screenshot({ path: errorScreenshot, fullPage: true });
 
+              if (this.logger) {
+                this.logger.event('no_navigation', {
+                  depth,
+                  url: currentUrl,
+                  pageName: metadata.pageName,
+                  combination: i + 1,
+                  errorScreenshot: `${pid}_error_${i}.png`
+                });
+              }
+
               if (i > 0) {
                 await branchContext.close();
               }
@@ -330,8 +590,29 @@ export class FormCrawler {
         }
       } else {
         // No choice points — fill and continue in current session
-        await fillFormFields(page, fields);
+        const filledFields = await fillFormFields(page, fields);
         await page.waitForTimeout(300);
+
+        if (this.logger) {
+          this.logger.event('form_fill', {
+            depth,
+            url: currentUrl,
+            pageName: metadata.pageName,
+            fieldsAttempted: fields.length,
+            fieldsFilled: filledFields.length,
+            fills: filledFields.map(f => ({
+              label: f.label || f.name || f.id,
+              type: f.type,
+              value: f.filledValue
+            }))
+          });
+        }
+
+        if (this.verbose && filledFields.length > 0) {
+          for (const f of filledFields) {
+            console.log(`       ✏️  [${f.type}] ${f.label || f.name || f.id} → "${f.filledValue}"`);
+          }
+        }
 
         const nextUrl = await this.clickContinue(page);
 

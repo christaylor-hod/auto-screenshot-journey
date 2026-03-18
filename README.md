@@ -58,6 +58,24 @@ node src/index.js https://example.gov.uk/apply --timeout 30000
 # Skip specific outputs
 node src/index.js https://example.gov.uk/apply --no-xlsx
 node src/index.js https://example.gov.uk/apply --no-mermaid
+
+# Dry run — visit only the start page and report what was found (fields, choices, buttons)
+node src/index.js https://example.gov.uk/apply --dry-run
+
+# Verbose mode — show every field fill, replay step, and navigation in the terminal
+node src/index.js https://example.gov.uk/apply --verbose
+
+# Combine for debugging: see the browser, verbose output, shallow crawl
+node src/index.js https://example.gov.uk/apply --headed --verbose --max-depth 3 --max-paths 5
+
+# Password-protected GOV.UK prototype (Heroku or localhost)
+node src/index.js https://my-prototype.herokuapp.com/start --password mypassword
+
+# Local prototype on localhost
+node src/index.js http://localhost:3000/start --password password
+
+# HTTP Basic Auth protected site
+node src/index.js https://staging.example.gov.uk/apply --auth username:password
 ```
 
 ### All options
@@ -70,6 +88,10 @@ node src/index.js https://example.gov.uk/apply --no-mermaid
 | `-t, --timeout <ms>` | Page load timeout (ms) | 15000 |
 | `--delay <ms>` | Delay between actions (ms) | 500 |
 | `--headed` | Show browser window | false |
+| `--verbose` | Show detailed fill, replay, and navigation output | false |
+| `--dry-run` | Visit start page only, report fields and choices found | false |
+| `--password <password>` | Password for GOV.UK Prototype Kit prototypes | none |
+| `--auth <user:pass>` | HTTP Basic Auth credentials (username:password) | none |
 | `--exclude-fields <ids>` | Comma-separated field IDs/names to ignore | none |
 | `--exclude-fields-file <path>` | File with field IDs/names to ignore (one per line) | none |
 | `--no-stay-on-domain` | Allow off-domain links | stays on domain |
@@ -94,12 +116,90 @@ output/
 │   ├── journey-map.mmd         # Mermaid source
 │   ├── journey-map.html        # Interactive viewer with zoom/pan and screenshots
 │   ├── journey-map.pdf         # PDF for importing into Mural
+│   ├── crawl.log               # Full timestamped log of everything that happened
+│   ├── manifest.json           # Machine-readable summary of the run
 │   └── screenshots/            # Full-page PNG of every page
 │       ├── page-1.png
 │       └── ...
 ├── 20260213_091500_register-to-vote/
 │   └── ...
 ```
+
+### Log file and manifest
+
+Every run produces two support files alongside the outputs:
+
+**`crawl.log`** — a plain-text log with timestamps for every action: page visits, field fills, navigations, warnings, and errors. Useful for understanding exactly what the crawler did, and for sharing with others when something doesn't look right.
+
+**`manifest.json`** — a structured JSON summary containing:
+- **Config** — the exact flags and options used for this run
+- **Environment** — Node version, OS, architecture, memory
+- **Timings** — how long the crawl, spreadsheet export, and diagram generation each took
+- **Results summary** — page count, path count, edge count, end pages, choice pages, total fields
+- **Pages** — every page discovered with URL, name, field count, choice points, and screenshot filename
+- **Paths** — every complete path through the form with the choices made at each step
+- **Events** — a chronological log of structured events (page visits, form fills with exact values entered, branch points, replays, navigation, errors)
+- **Warnings and errors** — any issues encountered during the crawl
+- **Output files** — a list of every file generated with sizes
+
+The manifest is particularly useful for comparing runs — you can diff two `manifest.json` files to see what changed between crawls of the same form.
+
+### Dry run
+
+Use `--dry-run` to visit only the start page without crawling further. This reports what fields, choice points, and buttons were found, so you can check the crawler is detecting the form correctly before committing to a full crawl:
+
+```
+$ node src/index.js https://example.gov.uk/apply --dry-run
+
+═══ DRY RUN REPORT ═══
+
+  Page name:     What is your enquiry about?
+  Fields found:  1
+  Choice points: 1
+  Buttons:       Continue
+
+  Fields:
+    • [radio] What is your enquiry about? (3 options)
+
+  Choice points (would branch into 3 combinations):
+    • enquiry-type: General | Complaint | Freedom of information
+```
+
+### Verbose mode
+
+Use `--verbose` to see detailed output in the terminal, including every field that was filled (with the value entered), every replay step when exploring branches, and every navigation. Combine with `--headed` to watch the browser while seeing the fill log:
+
+```bash
+node src/index.js https://example.gov.uk/apply --verbose --headed --max-depth 5
+```
+
+### Password-protected prototypes
+
+The tool works with GOV.UK Prototype Kit prototypes, including those hosted on Heroku with password protection and those running locally.
+
+**Localhost** — just pass the local URL, no special flags needed:
+
+```bash
+node src/index.js http://localhost:3000/start
+```
+
+**Prototype Kit password page** — use `--password` to automatically submit the password before crawling. The crawler detects the Prototype Kit's password form, submits the password, captures the auth cookie, and reuses it for every session (including when replaying branches):
+
+```bash
+# Heroku-hosted prototype
+node src/index.js https://my-prototype.herokuapp.com/start --password mypassword
+
+# Local prototype with password enabled
+node src/index.js http://localhost:3000/start --password password
+```
+
+**HTTP Basic Auth** — some staging environments use HTTP Basic Auth (the browser popup). Use `--auth` with `username:password` format:
+
+```bash
+node src/index.js https://staging.example.gov.uk/apply --auth admin:secretpass
+```
+
+Both auth methods can be combined with all other flags. The manifest.json records whether authentication was used (but not the password itself).
 
 ### Interactive HTML viewer
 

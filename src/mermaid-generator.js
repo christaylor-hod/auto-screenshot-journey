@@ -315,9 +315,10 @@ function generateHtml(crawlData, outputDir) {
 
     .edge-label {
       position: absolute; font-size: 10px; color: #505a5f;
-      background: rgba(255,255,255,0.92); padding: 1px 5px; border-radius: 3px;
-      pointer-events: none; white-space: nowrap; max-width: 130px;
-      overflow: hidden; text-overflow: ellipsis; border: 1px solid #e0e0e0;
+      background: rgba(255,255,255,0.92); padding: 2px 6px; border-radius: 3px;
+      pointer-events: none; max-width: 120px; width: max-content;
+      text-align: center; line-height: 1.3; word-wrap: break-word;
+      border: 1px solid #e0e0e0; transform: translate(-50%, -50%);
     }
     .edge-line { fill: none; stroke: #505a5f; stroke-width: 1.5; }
     .edge-arrow { fill: #505a5f; }
@@ -426,7 +427,7 @@ function generateHtml(crawlData, outputDir) {
       g.setGraph({
         rankdir: 'LR',
         nodesep: 50,
-        ranksep: 100,
+        ranksep: 140,
         marginx: 40,
         marginy: 40
       });
@@ -562,8 +563,8 @@ function generateHtml(crawlData, outputDir) {
           var labelEl = document.createElement('div');
           labelEl.className = 'edge-label';
           labelEl.textContent = label;
-          labelEl.style.left = (midPt.x - 30) + 'px';
-          labelEl.style.top = (midPt.y - 12) + 'px';
+          labelEl.style.left = midPt.x + 'px';
+          labelEl.style.top = midPt.y + 'px';
           container.appendChild(labelEl);
         }
       });
@@ -781,24 +782,46 @@ function generateHtml(crawlData, outputDir) {
       container.querySelectorAll('.edge-label').forEach(function(lbl) {
         var lx = parseInt(lbl.style.left);
         var ly = parseInt(lbl.style.top);
+        var lw = lbl.offsetWidth;
+        var lh = lbl.offsetHeight;
+
+        // Centre on the midpoint (matches CSS transform: translate(-50%, -50%))
+        var rx = lx - lw / 2 - 2;
+        var ry = ly - lh / 2 - 2;
+
         var bg = document.createElementNS(svgNs, 'rect');
-        bg.setAttribute('x', lx - 2);
-        bg.setAttribute('y', ly - 2);
-        bg.setAttribute('width', lbl.offsetWidth + 4);
-        bg.setAttribute('height', 16);
+        bg.setAttribute('x', rx);
+        bg.setAttribute('y', ry);
+        bg.setAttribute('width', lw + 4);
+        bg.setAttribute('height', lh + 4);
         bg.setAttribute('rx', 3);
         bg.setAttribute('fill', 'rgba(255,255,255,0.92)');
         bg.setAttribute('stroke', '#e0e0e0');
         bg.setAttribute('stroke-width', '1');
         svg.appendChild(bg);
 
-        var lt = document.createElementNS(svgNs, 'text');
-        lt.setAttribute('x', lx);
-        lt.setAttribute('y', ly + 10);
-        lt.setAttribute('fill', '#505a5f');
-        lt.setAttribute('font-size', '10');
-        lt.textContent = lbl.textContent;
-        svg.appendChild(lt);
+        // Wrap text into lines
+        var text = lbl.textContent.trim();
+        var lines = [];
+        var words = text.split(/\s+/);
+        var line = '';
+        words.forEach(function(word) {
+          var test = line ? line + ' ' + word : word;
+          if (test.length > 18 && line) { lines.push(line); line = word; }
+          else { line = test; }
+        });
+        if (line) lines.push(line);
+
+        lines.forEach(function(ln, i) {
+          var lt = document.createElementNS(svgNs, 'text');
+          lt.setAttribute('x', lx);
+          lt.setAttribute('y', ry + 12 + i * 13);
+          lt.setAttribute('text-anchor', 'middle');
+          lt.setAttribute('fill', '#505a5f');
+          lt.setAttribute('font-size', '10');
+          lt.textContent = ln;
+          svg.appendChild(lt);
+        });
       });
 
       // Serialize and download
