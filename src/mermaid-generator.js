@@ -180,9 +180,10 @@ body{font-family:"GDS Transport",Arial,sans-serif;background:#f3f2f1;color:#0b0c
 /* Node cards */
 .node-card{
   position:absolute;background:#fff;border:2px solid #b1b4b6;border-radius:6px;
-  overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,0.08);cursor:default;transition:box-shadow .15s;
+  overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,0.08);cursor:grab;transition:box-shadow .15s;
 }
 .node-card:hover{box-shadow:0 2px 12px rgba(0,0,0,0.15)}
+.node-card.dragging{cursor:grabbing;box-shadow:0 4px 20px rgba(0,0,0,0.25);z-index:100;opacity:0.92}
 .node-card.choice{border-color:#1D70B8;border-width:3px}
 .node-card.end-page{border-color:#00703C;border-width:3px}
 .node-thumb{width:220px;height:140px;object-fit:cover;object-position:top left;display:block;border-bottom:1px solid #e0e0e0;background:#f8f8f8}
@@ -213,6 +214,17 @@ body{font-family:"GDS Transport",Arial,sans-serif;background:#f3f2f1;color:#0b0c
 .edge-label.hidden{display:none}
 .edge-line{fill:none;stroke:#505a5f;stroke-width:1.5}
 .edge-arrow{fill:#505a5f}
+
+/* Text size variants */
+.text-s .node-title{font-size:10px}
+.text-s .edge-label{font-size:8px}
+.text-s .nb{font-size:8px}
+.text-m .node-title{font-size:12px}
+.text-m .edge-label{font-size:10px}
+.text-m .nb{font-size:10px}
+.text-l .node-title{font-size:15px}
+.text-l .edge-label{font-size:13px}
+.text-l .nb{font-size:12px}
 
 /* Stats */
 .stats{display:flex;gap:24px;margin-bottom:20px}
@@ -279,6 +291,12 @@ body{font-family:"GDS Transport",Arial,sans-serif;background:#f3f2f1;color:#0b0c
       <span class="tb-label">Labels</span>
       <button class="tb-btn active" id="btn-labels" onclick="toggleLabels()">On</button>
     </div>
+    <div class="tb-group">
+      <span class="tb-label">Text</span>
+      <button class="tb-btn" onclick="setTextSize('s')">S</button>
+      <button class="tb-btn active" id="btn-text-m" onclick="setTextSize('m')">M</button>
+      <button class="tb-btn" onclick="setTextSize('l')">L</button>
+    </div>
     <div class="tb-group level-nav">
       <span class="tb-label">Level</span>
       <button class="tb-btn" onclick="prevLevel()">&larr;</button>
@@ -293,7 +311,7 @@ body{font-family:"GDS Transport",Arial,sans-serif;background:#f3f2f1;color:#0b0c
     </div>
   </div>
   <div class="mermaid-viewport" id="viewport">
-    <div class="mermaid-canvas" id="canvas">
+    <div class="mermaid-canvas text-m" id="canvas">
       <svg id="edges-svg" style="position:absolute;top:0;left:0;pointer-events:none;overflow:visible;">
         <defs><marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" class="edge-arrow"/></marker></defs>
       </svg>
@@ -331,6 +349,7 @@ function layoutGraph(dir) {
 }
 
 function renderDiagram() {
+  livePositions = {};  // Reset drag positions on re-render
   var g = layoutGraph(currentDirection);
   var container = document.getElementById('diagram-container');
   var svg = document.getElementById('edges-svg');
@@ -465,6 +484,161 @@ function toggleLabels(){
   });
 }
 
+// ── Text size ──
+var currentTextSize = 'm';
+function setTextSize(size){
+  currentTextSize = size;
+  var c = document.getElementById('canvas');
+  c.classList.remove('text-s','text-m','text-l');
+  c.classList.add('text-'+size);
+  document.querySelectorAll('.tb-group').forEach(function(g){
+    var btns = g.querySelectorAll('.tb-btn');
+    btns.forEach(function(b){
+      if(b.textContent==='S'||b.textContent==='M'||b.textContent==='L'){
+        b.classList.toggle('active', b.textContent.toLowerCase()===size);
+      }
+    });
+  });
+}
+
+// ── Node dragging ──
+var dragState = null;       // { card, startLeft, startTop, startMouseX, startMouseY }
+var livePositions = {};     // nodeId -> {x, y} — updated live as nodes are dragged
+
+function initDrag(){
+  var container = document.getElementById('diagram-container');
+
+  container.addEventListener('mousedown', function(e){
+    var card = e.target.closest('.node-card');
+    if(!card) return;
+    // Don't start drag if clicking on editable text
+    if(e.target.isContentEditable || e.target.closest('[contenteditable]')) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    card.classList.add('dragging');
+    dragState = {
+      card: card,
+      nodeId: card.dataset.nodeId,
+      startLeft: parseInt(card.style.left),
+      startTop: parseInt(card.style.top),
+      startMouseX: e.clientX / scale,
+      startMouseY: e.clientY / scale
+    };
+  });
+
+  window.addEventListener('mousemove', function(e){
+    if(!dragState) return;
+    e.preventDefault();
+    var dx = (e.clientX / scale) - dragState.startMouseX;
+    var dy = (e.clientY / scale) - dragState.startMouseY;
+    var newLeft = dragState.startLeft + dx;
+    var newTop = dragState.startTop + dy;
+    dragState.card.style.left = newLeft + 'px';
+    dragState.card.style.top = newTop + 'px';
+
+    // Update live positions
+    livePositions[dragState.nodeId] = {
+      x: newLeft,
+      y: newTop,
+      cx: newLeft + NODE_WIDTH / 2,
+      cy: newTop + NODE_HEIGHT / 2
+    };
+
+    // Redraw edges in realtime
+    redrawEdges();
+  });
+
+  window.addEventListener('mouseup', function(){
+    if(!dragState) return;
+    dragState.card.classList.remove('dragging');
+    // Expand diagram container if card was dragged outside bounds
+    expandContainer();
+    dragState = null;
+  });
+}
+
+function expandContainer(){
+  var container = document.getElementById('diagram-container');
+  var svg = document.getElementById('edges-svg');
+  var maxR = 0, maxB = 0;
+  container.querySelectorAll('.node-card').forEach(function(card){
+    var r = parseInt(card.style.left) + card.offsetWidth + 40;
+    var b = parseInt(card.style.top) + card.offsetHeight + 40;
+    if(r > maxR) maxR = r;
+    if(b > maxB) maxB = b;
+  });
+  container.style.width = maxR + 'px';
+  container.style.height = maxB + 'px';
+  svg.setAttribute('width', maxR);
+  svg.setAttribute('height', maxB);
+  svg.style.width = maxR + 'px';
+  svg.style.height = maxB + 'px';
+}
+
+function getNodePosition(nodeId){
+  if(livePositions[nodeId]) return livePositions[nodeId];
+  // Find from DOM
+  var card = document.querySelector('.node-card[data-node-id="'+nodeId+'"]');
+  if(!card) return null;
+  var x = parseInt(card.style.left), y = parseInt(card.style.top);
+  return { x: x, y: y, cx: x + NODE_WIDTH/2, cy: y + NODE_HEIGHT/2 };
+}
+
+function redrawEdges(){
+  var svg = document.getElementById('edges-svg');
+  var container = document.getElementById('diagram-container');
+  var defs = svg.querySelector('defs');
+  svg.innerHTML = '';
+  svg.appendChild(defs);
+
+  // Remove old edge labels
+  container.querySelectorAll('.edge-label').forEach(function(el){ el.remove(); });
+
+  EDGES.forEach(function(e){
+    var from = getNodePosition(e.from);
+    var to = getNodePosition(e.to);
+    if(!from || !to) return;
+
+    var sx, sy, ex, ey;
+    if(currentDirection === 'LR'){
+      sx = from.cx + NODE_WIDTH/2; sy = from.cy;
+      ex = to.cx - NODE_WIDTH/2; ey = to.cy;
+    } else {
+      sx = from.cx; sy = from.cy + NODE_HEIGHT/2;
+      ex = to.cx; ey = to.cy - NODE_HEIGHT/2;
+    }
+
+    // Simple curve through midpoint
+    var mx = (sx + ex) / 2, my = (sy + ey) / 2;
+    var d = 'M '+sx+' '+sy+' Q '+mx+' '+sy+' '+mx+' '+my;
+    d += ' Q '+mx+' '+ey+' '+ex+' '+ey;
+
+    var pathEl = document.createElementNS('http://www.w3.org/2000/svg','path');
+    pathEl.setAttribute('d', d);
+    pathEl.setAttribute('class', 'edge-line');
+    pathEl.setAttribute('marker-end', 'url(#arrowhead)');
+    svg.appendChild(pathEl);
+
+    // Edge label
+    var label = e.label || '';
+    if(label){
+      var edgeKey = e.from + '-' + e.to;
+      var lbl = document.createElement('div');
+      lbl.className = 'edge-label' + (labelsVisible ? '' : ' hidden');
+      lbl.contentEditable = 'true';
+      lbl.textContent = edgeEdits[edgeKey] || label;
+      lbl.dataset.edgeKey = edgeKey;
+      lbl.style.left = mx + 'px';
+      lbl.style.top = my + 'px';
+      lbl.addEventListener('blur', function(){ edgeEdits[this.dataset.edgeKey] = this.textContent.trim(); });
+      lbl.addEventListener('keydown', function(ev){ if(ev.key==='Enter'){ev.preventDefault();this.blur();} });
+      container.appendChild(lbl);
+    }
+  });
+}
+
 // ── Level navigation ──
 function updateLevelDisplay(){
   var display = document.getElementById('level-display');
@@ -555,8 +729,8 @@ viewport.addEventListener('wheel',function(e){
   panX=mx-(mx-panX)*(scale/os);panY=my-(my-panY)*(scale/os);applyTransform();
 },{passive:false});
 
-viewport.addEventListener('mousedown',function(e){isPanning=true;startX=e.clientX-panX;startY=e.clientY-panY});
-window.addEventListener('mousemove',function(e){if(!isPanning)return;panX=e.clientX-startX;panY=e.clientY-startY;applyTransform()});
+viewport.addEventListener('mousedown',function(e){if(dragState)return;isPanning=true;startX=e.clientX-panX;startY=e.clientY-panY});
+window.addEventListener('mousemove',function(e){if(!isPanning||dragState)return;panX=e.clientX-startX;panY=e.clientY-startY;applyTransform()});
 window.addEventListener('mouseup',function(){isPanning=false});
 
 var lastTouchDist=0;
@@ -615,7 +789,8 @@ function buildExportSvg(){
     if(titleEl){
       var tt=document.createElementNS(svgNs,'text');
       tt.setAttribute('x',left+10);tt.setAttribute('y',top+158);tt.setAttribute('fill','#0b0c0c');
-      tt.setAttribute('font-size','12');tt.setAttribute('font-weight','700');
+      var titleFontSize = currentTextSize==='s'?10:currentTextSize==='l'?15:12;
+      tt.setAttribute('font-size',titleFontSize);tt.setAttribute('font-weight','700');
       var txt=titleEl.textContent.trim();if(txt.length>35)txt=txt.substring(0,32)+'...';
       tt.textContent=txt;svg.appendChild(tt);
     }
@@ -647,7 +822,7 @@ function buildExportSvg(){
       svg.appendChild(bg);
       var lt=document.createElementNS(svgNs,'text');
       lt.setAttribute('x',lx);lt.setAttribute('y',ly+4);lt.setAttribute('text-anchor','middle');
-      lt.setAttribute('fill','#505a5f');lt.setAttribute('font-size','10');lt.textContent=lbl.textContent;
+      lt.setAttribute('fill','#505a5f');var lblFs=currentTextSize==='s'?8:currentTextSize==='l'?13:10;lt.setAttribute('font-size',lblFs);lt.textContent=lbl.textContent;
       svg.appendChild(lt);
     });
   }
@@ -712,6 +887,7 @@ function closeLightbox(){document.getElementById('lightbox').classList.remove('a
 // ── Init ──
 document.addEventListener('DOMContentLoaded',function(){
   renderDiagram();
+  initDrag();
   setTimeout(zoomFit,200);
 });
 </` + `script>

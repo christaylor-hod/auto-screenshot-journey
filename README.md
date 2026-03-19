@@ -105,6 +105,16 @@ node src/index.js https://staging.example.gov.uk/apply --auth username:password
 - **Slow pages**: if pages take a while to load, increase `--timeout 30000` (30 seconds)
 - **Exclude noise**: site-wide search boxes, cookie buttons, and feedback widgets can be excluded with `--exclude-fields`
 
+### Key terms
+
+- **Depth** — how many pages deep into the journey a page sits. The start page is depth 0. After clicking Continue once you're at depth 1, after two submits depth 2, and so on. Two pages can be at the same depth but on completely different branches. The `--max-depth` flag limits how many steps the crawler will follow before stopping any given path.
+
+- **Paths** — complete journeys through the form from start to finish. If a form has no branching there's 1 path. If the first page has 2 radio options that lead to different routes, and both eventually reach an end page, that's 2 paths. The spreadsheet's Journey Paths tab lists every path with the choices made at each step. The `--max-paths` flag caps how many total paths the crawler will explore.
+
+- **Connections** — links between two pages. When you fill a form and click Continue, that creates one connection from the current page to the next. If a page has radio buttons with 3 options and each leads to a different page, that's 3 connections from that one page. In the diagram these are the arrows between nodes.
+
+- **Choice points** — form fields where the user picks between options that could lead to different pages (radio buttons, dropdowns, checkbox groups). The crawler detects these and systematically tries each option to discover every possible branch. A page with 0 choice points just gets filled and submitted once.
+
 ## Output
 
 Each crawl creates a timestamped subfolder named after the form's title:
