@@ -1,5 +1,5 @@
 import { chromium } from 'playwright';
-import { fillFormFields } from './form-filler.js';
+import { fillFormFields, setDateStrategy, getDateStrategyCount, getCurrentDateStrategyName } from './form-filler.js';
 import {
   extractPageMetadata,
   extractFormFields,
@@ -504,11 +504,13 @@ export class FormCrawler {
             const branchRawFields = await extractFormFields(branchPage);
             const branchFields = this.filterFields(branchRawFields);
 
-            // Fill the form with this combination
-            const filledFields = await fillFormFields(branchPage, branchFields, choices);
-            await branchPage.waitForTimeout(300);
+            // Fill and submit with date retry logic
+            const { nextUrl, filledFields } = await this.fillAndSubmitWithRetry(
+              branchPage, branchFields, choices,
+              { depth, pageName: metadata.pageName, combination: i + 1 }
+            );
 
-            if (this.logger) {
+            if (this.logger && filledFields.length > 0) {
               this.logger.event('form_fill', {
                 depth,
                 url: currentUrl,
@@ -524,16 +526,7 @@ export class FormCrawler {
               });
             }
 
-            if (this.verbose && filledFields.length > 0) {
-              for (const f of filledFields) {
-                console.log(`       ✏️  [${f.type}] ${f.label || f.name || f.id} → "${f.filledValue}"`);
-              }
-            }
-
-            // Click continue
-            const nextUrl = await this.clickContinue(branchPage);
-
-            if (nextUrl && nextUrl !== currentUrl) {
+            if (nextUrl) {
               const nextPk = this.pageKey(nextUrl);
               this.edges.push({
                 from: pk,
@@ -589,11 +582,13 @@ export class FormCrawler {
           }
         }
       } else {
-        // No choice points — fill and continue in current session
-        const filledFields = await fillFormFields(page, fields);
-        await page.waitForTimeout(300);
+        // No choice points — fill and submit with date retry logic
+        const { nextUrl, filledFields } = await this.fillAndSubmitWithRetry(
+          page, fields, {},
+          { depth, pageName: metadata.pageName }
+        );
 
-        if (this.logger) {
+        if (this.logger && filledFields.length > 0) {
           this.logger.event('form_fill', {
             depth,
             url: currentUrl,
@@ -608,15 +603,7 @@ export class FormCrawler {
           });
         }
 
-        if (this.verbose && filledFields.length > 0) {
-          for (const f of filledFields) {
-            console.log(`       ✏️  [${f.type}] ${f.label || f.name || f.id} → "${f.filledValue}"`);
-          }
-        }
-
-        const nextUrl = await this.clickContinue(page);
-
-        if (nextUrl && nextUrl !== currentUrl) {
+        if (nextUrl) {
           const nextPk = this.pageKey(nextUrl);
           this.edges.push({
             from: pk,
@@ -702,6 +689,118 @@ export class FormCrawler {
     }).catch(() => { /* ignore */ });
 
     await page.waitForTimeout(300);
+  }
+
+  /**
+   * Check if the page is showing validation errors (GOV.UK error summary)
+   */
+  async hasValidationErrors(page) {
+    return await page.evaluate(() => {
+      // GOV.UK error summary component
+      const errorSummary = document.querySelector('.govuk-error-summary, .error-summary, [role="alert"]');
+      if (errorSummary) {
+        const errorText = errorSummary.textContent || '';
+        return {
+          hasErrors: true,
+          errorText: errorText.trim().substring(0, 500),
+          isDateRelated: /date|day|month|year|must be|between|after|before|in the past|in the future|valid|range/i.test(errorText)
+        };
+      }
+
+      // Also check for inline field errors
+      const fieldErrors = document.querySelectorAll('.govuk-error-message, .field-validation-error, .error-message');
+      if (fieldErrors.length > 0) {
+        const errorText = Array.from(fieldErrors).map(e => e.textContent.trim()).join('; ');
+        return {
+          hasErrors: true,
+          errorText: errorText.substring(0, 500),
+          isDateRelated: /date|day|month|year|must be|between|after|before|in the past|in the future|valid|range/i.test(errorText)
+        };
+      }
+
+      return { hasErrors: false, errorText: '', isDateRelated: false };
+    }).catch(() => ({ hasErrors: false, errorText: '', isDateRelated: false }));
+  }
+
+  /**
+   * Fill a form and submit, retrying with different date strategies if validation fails.
+   * Returns { nextUrl, filledFields } or { nextUrl: null } if all retries fail.
+   */
+  async fillAndSubmitWithRetry(page, fields, choices = {}, context = {}) {
+    const maxDateRetries = getDateStrategyCount();
+
+    for (let attempt = 0; attempt < maxDateRetries; attempt++) {
+      setDateStrategy(attempt);
+
+      if (attempt > 0) {
+        console.log(`     🔄 Retrying with date strategy: ${getCurrentDateStrategyName()} (attempt ${attempt + 1}/${maxDateRetries})`);
+
+        if (this.logger) {
+          this.logger.event('date_retry', {
+            attempt: attempt + 1,
+            strategy: getCurrentDateStrategyName(),
+            url: page.url(),
+            ...context
+          });
+        }
+
+        // Re-extract fields since the page may have re-rendered with error state
+        const rawFields = await extractFormFields(page);
+        fields = this.filterFields(rawFields);
+      }
+
+      const filledFields = await fillFormFields(page, fields, choices);
+      await page.waitForTimeout(300);
+
+      if (this.verbose && filledFields.length > 0) {
+        for (const f of filledFields) {
+          console.log(`       ✏️  [${f.type}] ${f.label || f.name || f.id} → "${f.filledValue}"`);
+        }
+      }
+
+      const currentUrl = page.url();
+      const nextUrl = await this.clickContinue(page);
+
+      if (nextUrl && nextUrl !== currentUrl) {
+        // Success — reset strategy to default for next page
+        setDateStrategy(0);
+        return { nextUrl, filledFields };
+      }
+
+      // Check if we got validation errors
+      const validation = await this.hasValidationErrors(page);
+
+      if (validation.hasErrors) {
+        console.log(`     ⚠ Validation error: ${validation.errorText.substring(0, 120)}`);
+
+        if (this.logger) {
+          this.logger.event('validation_error', {
+            attempt: attempt + 1,
+            strategy: getCurrentDateStrategyName(),
+            isDateRelated: validation.isDateRelated,
+            errorText: validation.errorText,
+            url: currentUrl,
+            ...context
+          });
+        }
+
+        // If it's not date-related, no point trying more date strategies
+        if (!validation.isDateRelated && attempt > 0) {
+          console.log(`     ⚠ Non-date validation error — stopping retries`);
+          break;
+        }
+
+        // Continue to next strategy
+        continue;
+      }
+
+      // No navigation and no visible errors — probably just a reload
+      break;
+    }
+
+    // Reset date strategy for next page
+    setDateStrategy(0);
+    return { nextUrl: null, filledFields: [] };
   }
 
   /**

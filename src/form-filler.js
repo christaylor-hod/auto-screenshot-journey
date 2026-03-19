@@ -69,12 +69,19 @@ const fieldPatterns = [
   [/post.?code|zip/i, () => ukData.postcode()],
   [/country/i, () => 'United Kingdom'],
 
-  // Dates
-  [/date.?of.?birth|dob|birth.?date/i, () => '1985-06-15'],
-  [/day/i, () => '15'],
-  [/month/i, () => '6'],
-  [/year/i, () => '1985'],
-  [/date/i, () => '2024-01-15'],
+  // Dates — IMPORTANT: day/month/year component patterns must come BEFORE
+  // full date patterns, because GOV.UK date inputs use three separate fields
+  // inside a fieldset labelled "Date of birth" etc. Without this ordering,
+  // the label "Date of birth" matches /dob/ first and fills "1985-06-15"
+  // into a field that only expects "15".
+  // These patterns match field names/IDs like "dob-day", "passport-issued-month",
+  // "year-of-birth" etc. The lookbehind ensures we match "-day" or "_day" as a
+  // suffix/component, not just the word "day" in a label like "What day works best".
+  [/[-_]day\b/i, () => DATE_STRATEGIES[currentDateStrategyIndex].day()],
+  [/[-_]month\b/i, () => DATE_STRATEGIES[currentDateStrategyIndex].month()],
+  [/[-_]year\b/i, () => DATE_STRATEGIES[currentDateStrategyIndex].year()],
+  [/date.?of.?birth|dob|birth.?date/i, () => DOB_DATE.full()],
+  [/date/i, () => DATE_STRATEGIES[currentDateStrategyIndex].full()],
 
   // UK Government specific
   [/national.?insurance|ni.?number|nino/i, () => ukData.niNumber()],
@@ -98,12 +105,93 @@ const fieldPatterns = [
 ];
 
 /**
- * Determine what value to fill for a given form field
+ * Date generation strategies.
+ * When a form rejects one set of dates (e.g. "must be within the last year"),
+ * the crawler can retry with a different strategy.
  */
+const DATE_STRATEGIES = [
+  {
+    name: 'recent_past',      // Default: 2 weeks ago — passes most "recent date" validations
+    day: () => { const d = new Date(); d.setDate(d.getDate() - 14); return String(d.getDate()); },
+    month: () => { const d = new Date(); d.setDate(d.getDate() - 14); return String(d.getMonth() + 1); },
+    year: () => { const d = new Date(); d.setDate(d.getDate() - 14); return String(d.getFullYear()); },
+    full: () => { const d = new Date(); d.setDate(d.getDate() - 14); return d.toISOString().split('T')[0]; }
+  },
+  {
+    name: 'near_future',      // 2 weeks from now — for booking/appointment forms
+    day: () => { const d = new Date(); d.setDate(d.getDate() + 14); return String(d.getDate()); },
+    month: () => { const d = new Date(); d.setDate(d.getDate() + 14); return String(d.getMonth() + 1); },
+    year: () => { const d = new Date(); d.setDate(d.getDate() + 14); return String(d.getFullYear()); },
+    full: () => { const d = new Date(); d.setDate(d.getDate() + 14); return d.toISOString().split('T')[0]; }
+  },
+  {
+    name: 'today',            // Today's date
+    day: () => String(new Date().getDate()),
+    month: () => String(new Date().getMonth() + 1),
+    year: () => String(new Date().getFullYear()),
+    full: () => new Date().toISOString().split('T')[0]
+  },
+  {
+    name: 'months_ago',       // 3 months ago — passes "within the last 6/12 months" validations
+    day: () => { const d = new Date(); d.setMonth(d.getMonth() - 3); return String(d.getDate()); },
+    month: () => { const d = new Date(); d.setMonth(d.getMonth() - 3); return String(d.getMonth() + 1); },
+    year: () => { const d = new Date(); d.setMonth(d.getMonth() - 3); return String(d.getFullYear()); },
+    full: () => { const d = new Date(); d.setMonth(d.getMonth() - 3); return d.toISOString().split('T')[0]; }
+  },
+  {
+    name: 'far_past',         // Last resort: fixed historical date
+    day: () => '15',
+    month: () => '6',
+    year: () => '1985',
+    full: () => '1985-06-15'
+  }
+];
+
+// DOB is always a separate concern — use an age of ~30
+const DOB_DATE = {
+  day: () => '15',
+  month: () => '6',
+  year: () => String(new Date().getFullYear() - 30),
+  full: () => `${new Date().getFullYear() - 30}-06-15`
+};
+
+// Current date strategy index — can be advanced by the crawler on retry
+let currentDateStrategyIndex = 0;
+
+export function setDateStrategy(index) {
+  currentDateStrategyIndex = Math.min(index, DATE_STRATEGIES.length - 1);
+}
+
+export function getDateStrategyCount() {
+  return DATE_STRATEGIES.length;
+}
+
+export function getCurrentDateStrategyName() {
+  return DATE_STRATEGIES[currentDateStrategyIndex].name;
+}
+
+function getDateValues(nameId, searchText) {
+  // Check if this is a DOB field — always use the DOB date regardless of strategy
+  const isDob = /date.?of.?birth|dob|birth.?date/.test(searchText) || /dob/.test(nameId);
+
+  const source = isDob ? DOB_DATE : DATE_STRATEGIES[currentDateStrategyIndex];
+
+  if (/[-_]day\b/.test(nameId)) return source.day();
+  if (/[-_]month\b/.test(nameId)) return source.month();
+  if (/[-_]year\b/.test(nameId)) return source.year();
+
+  return null; // Not a date component field
+}
+
 export function generateValueForField(field) {
   const searchText = `${field.label || ''} ${field.name || ''} ${field.id || ''} ${field.placeholder || ''}`.toLowerCase();
+  const nameId = `${field.name || ''} ${field.id || ''}`.toLowerCase();
 
-  // Try pattern matching first
+  // GOV.UK date input detection: check name/id for day/month/year components
+  const dateValue = getDateValues(nameId, searchText);
+  if (dateValue !== null) return dateValue;
+
+  // Try pattern matching
   for (const [pattern, generator] of fieldPatterns) {
     if (pattern.test(searchText)) {
       return generator();
@@ -119,7 +207,7 @@ export function generateValueForField(field) {
     case 'number':
       return '5';
     case 'date':
-      return '2024-01-15';
+      return DATE_STRATEGIES[currentDateStrategyIndex].full();
     case 'url':
       return 'https://www.example.com';
     case 'password':
