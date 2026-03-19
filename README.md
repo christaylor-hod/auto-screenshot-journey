@@ -1,6 +1,8 @@
 # Form Journey Mapper
 
-Automatically crawl form-based websites (especially GOV.UK services), explore all branching paths, and generate structured documentation including spreadsheets, flowcharts with page screenshots, and a PDF for importing into Mural.
+Automatically crawl form-based websites (optimised for GOV.UK transactional services), explore all branching paths, and generate structured documentation including spreadsheets, flowcharts with page screenshots, and a PDF for importing into Mural.
+
+Works with real services, and published prototypes both local and public. 
 
 ## What it does
 
@@ -10,6 +12,8 @@ Automatically crawl form-based websites (especially GOV.UK services), explore al
 4. **Takes screenshots** of every page in the journey (cookie banners are automatically hidden)
 5. **Exports to XLSX** — a structured spreadsheet with pages shown in hierarchy, form fields, journey paths, and connections
 6. **Generates a visual flowchart** — an interactive HTML diagram with page screenshots on each node, zoom/pan controls, and SVG export. Also generates a PDF for importing into Mural.
+
+**Note this will submit real forms if it navigates to a submission page** 
 
 ## Setup
 
