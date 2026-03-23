@@ -31,8 +31,10 @@ npx playwright install chromium
 
 ### Basic usage
 ```bash
-node src/index.js https://example-service.gov.uk/start
+node src/index.js https://example-service.gov.uk/question1
 ```
+
+** Note - best results are from inputting the first proper question page of the service you want to screenshot **
 
 ### Common flags
 
