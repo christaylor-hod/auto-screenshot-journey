@@ -4,9 +4,11 @@ Automatically crawl form-based websites (optimised for GOV.UK transactional serv
 
 Works with real services, and published prototypes both local and public. 
 
+Made with ai assistance. 
+
 ## What it does
 
-1. **Crawls** a form-based website starting from a URL you provide
+1. **Crawls** a form-based website starting from a URL you provide (using Playwright)
 2. **Fills forms intelligently** with realistic UK dummy data (names, NI numbers, postcodes, etc.)
 3. **Explores all paths** — when it encounters radio buttons, dropdowns, or other choice points, it systematically tries every option to discover all branches
 4. **Takes screenshots** of every page in the journey (cookie banners are automatically hidden)
