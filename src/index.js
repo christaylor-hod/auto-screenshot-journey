@@ -33,6 +33,7 @@ program
   .option('--verbose', 'Show detailed output including every field fill and replay step', false)
   .option('--password <password>', 'Password for GOV.UK Prototype Kit password-protected prototypes')
   .option('--auth <user:pass>', 'HTTP Basic Auth credentials (username:password)')
+  .option('--pause-for-login', 'Open browser for manual login before crawling (for One Login, MFA etc)', false)
   .action(async (url, options) => {
 
     // Initialise logger — starts capturing all console output immediately
@@ -95,7 +96,8 @@ program
       dryRun: !!options.dryRun,
       excludeFields: excludeFields,
       passwordProtected: !!options.password,
-      httpAuth: !!httpAuth
+      httpAuth: !!httpAuth,
+      pauseForLogin: !!options.pauseForLogin
     });
 
     // Resolve output directory
@@ -116,7 +118,8 @@ program
       logger: logger,
       verbose: !!options.verbose,
       password: options.password || null,
-      httpAuth: httpAuth
+      httpAuth: httpAuth,
+      pauseForLogin: !!options.pauseForLogin
     });
 
     try {

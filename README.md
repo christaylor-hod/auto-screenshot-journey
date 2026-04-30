@@ -1,21 +1,15 @@
 # Form Journey Mapper
 
-Automatically crawl form-based websites (optimised for GOV.UK transactional services), explore all branching paths, and generate structured documentation including spreadsheets, flowcharts with page screenshots, and a PDF for importing into Mural.
-
-Works with real services, and published prototypes both local and public. 
-
-Made with ai assistance. 
+Automatically crawl form-based websites (especially GOV.UK services), explore all branching paths, and generate structured documentation including spreadsheets, flowcharts with page screenshots, and a PDF for importing into Mural.
 
 ## What it does
 
-1. **Crawls** a form-based website starting from a URL you provide (using Playwright)
+1. **Crawls** a form-based website starting from a URL you provide
 2. **Fills forms intelligently** with realistic UK dummy data (names, NI numbers, postcodes, etc.)
 3. **Explores all paths** — when it encounters radio buttons, dropdowns, or other choice points, it systematically tries every option to discover all branches
 4. **Takes screenshots** of every page in the journey (cookie banners are automatically hidden)
 5. **Exports to XLSX** — a structured spreadsheet with pages shown in hierarchy, form fields, journey paths, and connections
 6. **Generates a visual flowchart** — an interactive HTML diagram with page screenshots on each node, zoom/pan controls, and SVG export. Also generates a PDF for importing into Mural.
-
-**Note this will submit real forms if it navigates to a submission page** 
 
 ## Setup
 
@@ -31,10 +25,8 @@ npx playwright install chromium
 
 ### Basic usage
 ```bash
-node src/index.js https://example-service.gov.uk/question1
+node src/index.js https://example-service.gov.uk/start
 ```
-
-** Note - best results are from inputting the first proper question page of the service you want to screenshot **
 
 ### Common flags
 
@@ -84,6 +76,10 @@ node src/index.js http://localhost:3000/start --password password
 
 # HTTP Basic Auth protected site
 node src/index.js https://staging.example.gov.uk/apply --auth username:password
+
+# Services behind GOV.UK One Login or other MFA
+# Opens a browser for you to log in manually, then captures the session
+node src/index.js https://service.gov.uk/start --pause-for-login
 ```
 
 ### All options
@@ -100,6 +96,7 @@ node src/index.js https://staging.example.gov.uk/apply --auth username:password
 | `--dry-run` | Visit start page only, report fields and choices found | false |
 | `--password <password>` | Password for GOV.UK Prototype Kit prototypes | none |
 | `--auth <user:pass>` | HTTP Basic Auth credentials (username:password) | none |
+| `--pause-for-login` | Open browser for manual login before crawling | false |
 | `--exclude-fields <ids>` | Comma-separated field IDs/names to ignore | none |
 | `--exclude-fields-file <path>` | File with field IDs/names to ignore (one per line) | none |
 | `--no-stay-on-domain` | Allow off-domain links | stays on domain |
@@ -218,6 +215,22 @@ node src/index.js https://staging.example.gov.uk/apply --auth admin:secretpass
 ```
 
 Both auth methods can be combined with all other flags. The manifest.json records whether authentication was used (but not the password itself).
+
+**GOV.UK One Login / MFA** — for services behind GOV.UK One Login or any other authentication that requires multi-factor (SMS codes, authenticator apps etc), use `--pause-for-login`. This opens a visible browser window and waits for you to complete the login manually:
+
+```bash
+node src/index.js https://service.gov.uk/start --pause-for-login
+```
+
+The flow:
+1. A Chrome window opens and navigates to your start URL
+2. You'll be redirected to the One Login page — log in as normal, complete the SMS/MFA step
+3. Once you're through to the actual service page, switch back to the terminal and press Enter
+4. The crawler captures all session cookies from your authenticated browser, closes it, and starts crawling using those cookies
+
+Every branch replay injects the same cookies into a fresh context, so the session carries through the entire crawl. If the login redirected you to a different page on the same domain, the crawler automatically updates its start URL to match.
+
+This works with any login system — not just One Login. If a service uses Azure AD, Okta, or any other identity provider, the same `--pause-for-login` approach applies.
 
 ### Interactive HTML viewer
 

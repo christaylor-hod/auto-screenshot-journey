@@ -8,6 +8,7 @@ import {
 } from './data-extractor.js';
 import path from 'path';
 import fs from 'fs';
+import readline from 'readline';
 
 /**
  * Crawl a form-based website exploring all branching paths.
@@ -31,6 +32,7 @@ export class FormCrawler {
     this.verbose = options.verbose || false;
     this.password = options.password || null;
     this.httpAuth = options.httpAuth || null; // { username, password }
+    this.pauseForLogin = options.pauseForLogin || false;
 
     // Collected data
     this.pages = new Map();        // pageKey -> page data
@@ -84,7 +86,79 @@ export class FormCrawler {
    * Handles GOV.UK Prototype Kit password pages and HTTP Basic Auth.
    */
   async authenticate() {
-    if (!this.password && !this.httpAuth) return;
+    if (!this.password && !this.httpAuth && !this.pauseForLogin) return;
+
+    // ── Pause for manual login (e.g. GOV.UK One Login with SMS) ──
+    if (this.pauseForLogin) {
+      console.log(`\n  🔑 Opening browser for manual login...`);
+      console.log(`     Log in to the service in the browser window that opens.`);
+      console.log(`     Complete any authentication steps (username, password, SMS codes, etc).`);
+      console.log(`     Once you're past the login and on the actual service page,`);
+      console.log(`     come back here and press ENTER to continue.\n`);
+
+      // Force headed mode for this — user needs to see the browser
+      const loginBrowser = await chromium.launch({
+        headless: false,
+        channel: 'chrome',
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+      });
+      const loginContext = await loginBrowser.newContext({
+        viewport: { width: 1280, height: 900 }
+      });
+      const loginPage = await loginContext.newPage();
+
+      try {
+        await loginPage.goto(this.startUrl, { waitUntil: 'networkidle', timeout: this.timeout });
+      } catch {
+        // Timeout is fine — login pages often have redirects that don't settle
+      }
+
+      // Wait for the user to press Enter
+      await new Promise((resolve) => {
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        rl.question('  ✋ Press ENTER when you have finished logging in... ', () => {
+          rl.close();
+          resolve();
+        });
+      });
+
+      // Capture the current URL (user may have navigated past the start URL)
+      const landingUrl = loginPage.url();
+      console.log(`  📍 Current page: ${landingUrl}`);
+
+      // Capture all cookies from the authenticated session
+      this.authCookies = await loginContext.cookies();
+      console.log(`  🍪 Captured ${this.authCookies.length} cookies`);
+
+      // Also capture localStorage/sessionStorage if available
+      const storageState = await loginContext.storageState();
+
+      if (this.logger) {
+        this.logger.event('authentication', {
+          method: 'manual_login',
+          success: true,
+          cookieCount: this.authCookies.length,
+          landingUrl: landingUrl
+        });
+      }
+
+      console.log(`  ✅ Session captured — closing login browser\n`);
+
+      await loginContext.close();
+      await loginBrowser.close();
+
+      // If the landing URL is different from the start URL, update startUrl
+      // so the crawler begins from where the user ended up
+      if (landingUrl !== this.startUrl) {
+        const sameOrigin = new URL(landingUrl).origin === new URL(this.startUrl).origin;
+        if (sameOrigin) {
+          console.log(`  📍 Start URL updated to: ${landingUrl}`);
+          this.startUrl = landingUrl;
+        }
+      }
+
+      return;
+    }
 
     if (this.httpAuth) {
       console.log(`  🔑 HTTP Basic Auth configured for user "${this.httpAuth.username}"`);
